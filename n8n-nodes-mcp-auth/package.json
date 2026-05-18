@@ -1,0 +1,44 @@
+{
+  "name": "n8n-nodes-mcp-auth-trigger",
+  "version": "1.0.0",
+  "description": "n8n community node: MCP Server Trigger with Authorization header passthrough",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "mcp",
+    "auth",
+    "trigger"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Your Name",
+    "email": "your@email.com"
+  },
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/Auth0Api.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/McpAuthTrigger/McpAuthTrigger.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^20.19.41",
+    "n8n-workflow": "^2.16.0",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  }
+}
