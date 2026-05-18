@@ -197,10 +197,14 @@ export class McpAuthTrigger implements INodeType {
       auth = await validateWithAuth0(auth0Domain, token);
 
       if (!auth.valid && rejectInvalid) {
-        res.status(401).json({
-          error:   'Unauthorized',
-          message: auth.error ?? 'Invalid or missing Bearer token',
-        });
+        // Return 401 with WWW-Authenticate header — tells MCP client the
+        // token is invalid without triggering OAuth discovery flow
+        res.status(401)
+          .set('WWW-Authenticate', 'Bearer error="invalid_token", error_description="Auth0 token validation failed"')
+          .json({
+            error:             'invalid_token',
+            error_description: auth.error ?? 'Invalid or missing Bearer token',
+          });
         return { noWebhookResponse: true };
       }
     }

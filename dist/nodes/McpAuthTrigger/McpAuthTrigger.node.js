@@ -3,36 +3,51 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.McpAuthTrigger = void 0;
 const n8n_workflow_1 = require("n8n-workflow");
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
-const bearerAuth_js_1 = require("@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js");
 const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
-// ── Auth0 token verifier ──────────────────────────────────────────────────────
-function makeAuth0Verifier(domain) {
-    return {
-        async verifyAccessToken(token) {
-            var _a;
-            const res = await fetch(`https://${domain}/userinfo`, {
-                headers: { Authorization: `Bearer ${token}` },
-            });
-            if (!res.ok) {
-                throw new Error(`Auth0 rejected token: ${res.status} ${res.statusText}`);
-            }
-            const user = (await res.json());
-            let expiresAt;
-            try {
-                const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-                expiresAt = payload.exp;
-            }
-            catch (_) { }
+// ── Validate token directly with Auth0 /userinfo ─────────────────────────────
+async function validateWithAuth0(domain, token) {
+    var _a, _b;
+    if (!token) {
+        return { valid: false, token: '', email: null, sub: null, userData: null, expiresAt: undefined, error: 'No token provided' };
+    }
+    try {
+        const res = await fetch(`https://${domain}/userinfo`, {
+            headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) {
             return {
-                token,
-                clientId: (_a = user['sub']) !== null && _a !== void 0 ? _a : 'unknown',
-                scopes: [],
-                expiresAt,
-                extra: { email: user['email'], userData: user },
+                valid: false, token, email: null, sub: null, userData: null, expiresAt: undefined,
+                error: `Auth0 /userinfo returned ${res.status}: ${res.statusText}`,
             };
-        },
-    };
+        }
+        const user = (await res.json());
+        // Decode JWT exp claim
+        let expiresAt;
+        try {
+            const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+            expiresAt = payload.exp;
+        }
+        catch (_) { }
+        return {
+            valid: true,
+            token,
+            email: (_a = user['email']) !== null && _a !== void 0 ? _a : null,
+            sub: (_b = user['sub']) !== null && _b !== void 0 ? _b : null,
+            userData: user,
+            expiresAt,
+        };
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { valid: false, token, email: null, sub: null, userData: null, expiresAt: undefined, error: msg };
+    }
+}
+// ── Extract Bearer token from request ────────────────────────────────────────
+function extractToken(req) {
+    const authHeader = req.headers['authorization'] ||
+        req.headers['Authorization'] || '';
+    return authHeader.replace(/^Bearer\s+/i, '').trim();
 }
 // ── Node ──────────────────────────────────────────────────────────────────────
 class McpAuthTrigger {
@@ -46,7 +61,6 @@ class McpAuthTrigger {
             description: 'MCP Server Trigger with Auth0 Bearer token validation. ' +
                 'Connect tools via the ai_tool port exactly like the native MCP Server Trigger.',
             defaults: { name: 'MCP Auth Trigger' },
-            // Accept ai_tool connections from toolWorkflow nodes
             inputs: [
                 {
                     type: n8n_workflow_1.NodeConnectionTypes.AiTool,
@@ -54,9 +68,8 @@ class McpAuthTrigger {
                     required: false,
                 },
             ],
-            // @ts-ignore — n8n runtime accepts string here
-            outputs: ['main'],
-            outputNames: ['Response'],
+            // @ts-ignore
+            outputs: [],
             webhooks: [
                 {
                     name: 'setup',
@@ -64,6 +77,7 @@ class McpAuthTrigger {
                     responseMode: 'onReceived',
                     isFullPath: true,
                     path: '={{$parameter["path"]}}',
+                    // @ts-ignore
                     nodeType: 'mcp',
                     ndvHideMethod: true,
                     ndvHideUrl: false,
@@ -74,6 +88,7 @@ class McpAuthTrigger {
                     responseMode: 'onReceived',
                     isFullPath: true,
                     path: '={{$parameter["path"]}}',
+                    // @ts-ignore
                     nodeType: 'mcp',
                     ndvHideMethod: true,
                     ndvHideUrl: true,
@@ -84,6 +99,7 @@ class McpAuthTrigger {
                     responseMode: 'onReceived',
                     isFullPath: true,
                     path: '={{$parameter["path"]}}',
+                    // @ts-ignore
                     nodeType: 'mcp',
                     ndvHideMethod: true,
                     ndvHideUrl: true,
@@ -94,9 +110,9 @@ class McpAuthTrigger {
                     displayName: 'Path',
                     name: 'path',
                     type: 'string',
-                    default: 'mcp',
+                    default: 'mcp-auth',
                     required: true,
-                    description: 'URL path for the MCP endpoint (e.g. "mcp" → /webhook/mcp)',
+                    description: 'The path for this MCP endpoint (e.g. "eod_prices" → /mcp/eod_prices)',
                 },
                 {
                     displayName: 'Token Validation',
@@ -106,7 +122,7 @@ class McpAuthTrigger {
                         { name: 'None', value: 'none' },
                         { name: 'Auth0 /userinfo', value: 'auth0' },
                     ],
-                    default: 'auth0',
+                    default: 'none',
                     description: 'How to validate the incoming Bearer token',
                 },
                 {
@@ -117,7 +133,7 @@ class McpAuthTrigger {
                     placeholder: 'your-tenant.us.auth0.com',
                     required: true,
                     displayOptions: { show: { tokenValidation: ['auth0'] } },
-                    description: 'Auth0 domain used to call /userinfo for token validation',
+                    description: 'Auth0 domain for /userinfo validation',
                 },
                 {
                     displayName: 'Reject Invalid Tokens',
@@ -125,37 +141,40 @@ class McpAuthTrigger {
                     type: 'boolean',
                     default: true,
                     displayOptions: { show: { tokenValidation: ['auth0'] } },
-                    description: 'Return 401 immediately when token is invalid or expired',
+                    description: 'Return 401 immediately when token is invalid, or pass auth info downstream',
                 },
             ],
         };
     }
     // ── Webhook handler ──────────────────────────────────────────────────────
     async webhook() {
+        var _a;
         const req = this.getRequestObject();
         const res = this.getResponseObject();
-        const tokenValidation = this.getNodeParameter('tokenValidation', 'auth0');
+        const tokenValidation = this.getNodeParameter('tokenValidation', 'none');
         const auth0Domain = this.getNodeParameter('auth0Domain', '');
         const rejectInvalid = this.getNodeParameter('rejectInvalid', true);
-        // ── 1. Auth0 bearer validation ───────────────────────────────────────
+        // ── 1. Validate token manually (no OAuth middleware) ──────────────────
+        let auth = {
+            valid: true, token: '', email: null, sub: null,
+            userData: null, expiresAt: undefined,
+        };
         if (tokenValidation === 'auth0') {
-            const verifier = makeAuth0Verifier(auth0Domain);
-            const middleware = (0, bearerAuth_js_1.requireBearerAuth)({ verifier });
-            const passed = await new Promise((resolve) => {
-                middleware(req, res, (err) => resolve(!err));
-            });
-            if (!passed && rejectInvalid) {
-                // requireBearerAuth already wrote the 401
+            const token = extractToken(req);
+            auth = await validateWithAuth0(auth0Domain, token);
+            if (!auth.valid && rejectInvalid) {
+                res.status(401).json({
+                    error: 'Unauthorized',
+                    message: (_a = auth.error) !== null && _a !== void 0 ? _a : 'Invalid or missing Bearer token',
+                });
                 return { noWebhookResponse: true };
             }
         }
-        const authInfo = req.auth;
-        // ── 2. Load connected tools via ai_tool port ─────────────────────────
-        // This is exactly what the native MCP Server Trigger does internally
+        // ── 2. Load connected tools via ai_tool port ──────────────────────────
         const tools = (await this.getInputConnectionData(n8n_workflow_1.NodeConnectionTypes.AiTool, 0));
-        // ── 3. Build raw MCP Server with tool list + call handlers ───────────
+        // ── 3. Build MCP server ───────────────────────────────────────────────
         const server = new index_js_1.Server({ name: 'mcp-auth-trigger', version: '1.0.0' }, { capabilities: { tools: {} } });
-        // tools/list — expose all connected tools to Claude
+        // tools/list
         server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
             tools: tools.map((t) => {
                 var _a;
@@ -166,9 +185,8 @@ class McpAuthTrigger {
                 });
             }),
         }));
-        // tools/call — call the matched tool and inject _auth into params
+        // tools/call
         server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
-            var _a, _b, _c, _d, _e;
             const { name, arguments: args = {} } = request.params;
             const tool = tools.find((t) => t.name === name);
             if (!tool) {
@@ -177,20 +195,18 @@ class McpAuthTrigger {
                     isError: true,
                 };
             }
-            // Inject auth info so the sub-workflow can validate / use it
+            // Inject auth info into tool params
             const callParams = {
                 ...args,
-                access_token: (_a = authInfo === null || authInfo === void 0 ? void 0 : authInfo.token) !== null && _a !== void 0 ? _a : '',
-                _auth: authInfo
-                    ? {
-                        token: authInfo.token,
-                        clientId: authInfo.clientId,
-                        email: (_c = (_b = authInfo.extra) === null || _b === void 0 ? void 0 : _b['email']) !== null && _c !== void 0 ? _c : null,
-                        userData: (_e = (_d = authInfo.extra) === null || _d === void 0 ? void 0 : _d['userData']) !== null && _e !== void 0 ? _e : null,
-                        expiresAt: authInfo.expiresAt,
-                        tokenValid: true,
-                    }
-                    : { tokenValid: false },
+                access_token: auth.token,
+                _auth: {
+                    token: auth.token,
+                    email: auth.email,
+                    sub: auth.sub,
+                    userData: auth.userData,
+                    expiresAt: auth.expiresAt,
+                    tokenValid: auth.valid,
+                },
             };
             try {
                 const result = await tool.call(callParams);
@@ -209,7 +225,7 @@ class McpAuthTrigger {
                 };
             }
         });
-        // ── 4. Streamable HTTP transport — handles MCP protocol ──────────────
+        // ── 4. Streamable HTTP transport ──────────────────────────────────────
         const transport = new streamableHttp_js_1.StreamableHTTPServerTransport({
             sessionIdGenerator: undefined, // stateless
         });
