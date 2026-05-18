@@ -1,9 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.McpAuthTrigger = void 0;
-const mcp_js_1 = require("@modelcontextprotocol/sdk/server/mcp.js");
+const n8n_workflow_1 = require("n8n-workflow");
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const bearerAuth_js_1 = require("@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js");
+const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
+const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 // ── Auth0 token verifier ──────────────────────────────────────────────────────
 function makeAuth0Verifier(domain) {
     return {
@@ -32,7 +34,7 @@ function makeAuth0Verifier(domain) {
         },
     };
 }
-// ── The n8n node ──────────────────────────────────────────────────────────────
+// ── Node ──────────────────────────────────────────────────────────────────────
 class McpAuthTrigger {
     constructor() {
         this.description = {
@@ -41,19 +43,50 @@ class McpAuthTrigger {
             icon: 'fa:plug',
             group: ['trigger'],
             version: 1,
-            description: 'Real MCP Server (Streamable HTTP) with Auth0 Bearer token validation. ' +
-                'Tool parameters are forwarded to your n8n workflow.',
+            description: 'MCP Server Trigger with Auth0 Bearer token validation. ' +
+                'Connect tools via the ai_tool port exactly like the native MCP Server Trigger.',
             defaults: { name: 'MCP Auth Trigger' },
-            inputs: [],
-            // @ts-ignore
+            // Accept ai_tool connections from toolWorkflow nodes
+            inputs: [
+                {
+                    type: n8n_workflow_1.NodeConnectionTypes.AiTool,
+                    displayName: 'Tools',
+                    required: false,
+                },
+            ],
+            // @ts-ignore — n8n runtime accepts string here
             outputs: ['main'],
-            outputNames: ['Workflow'],
+            outputNames: ['Response'],
             webhooks: [
+                {
+                    name: 'setup',
+                    httpMethod: 'GET',
+                    responseMode: 'onReceived',
+                    isFullPath: true,
+                    path: '={{$parameter["path"]}}',
+                    nodeType: 'mcp',
+                    ndvHideMethod: true,
+                    ndvHideUrl: false,
+                },
                 {
                     name: 'default',
                     httpMethod: 'POST',
-                    responseMode: 'responseNode',
+                    responseMode: 'onReceived',
+                    isFullPath: true,
                     path: '={{$parameter["path"]}}',
+                    nodeType: 'mcp',
+                    ndvHideMethod: true,
+                    ndvHideUrl: true,
+                },
+                {
+                    name: 'default',
+                    httpMethod: 'DELETE',
+                    responseMode: 'onReceived',
+                    isFullPath: true,
+                    path: '={{$parameter["path"]}}',
+                    nodeType: 'mcp',
+                    ndvHideMethod: true,
+                    ndvHideUrl: true,
                 },
             ],
             properties: [
@@ -63,7 +96,7 @@ class McpAuthTrigger {
                     type: 'string',
                     default: 'mcp',
                     required: true,
-                    description: 'Webhook path for the MCP endpoint (e.g. "mcp" → /webhook/mcp)',
+                    description: 'URL path for the MCP endpoint (e.g. "mcp" → /webhook/mcp)',
                 },
                 {
                     displayName: 'Token Validation',
@@ -84,101 +117,70 @@ class McpAuthTrigger {
                     placeholder: 'your-tenant.us.auth0.com',
                     required: true,
                     displayOptions: { show: { tokenValidation: ['auth0'] } },
-                    description: 'Auth0 domain used to call /userinfo',
+                    description: 'Auth0 domain used to call /userinfo for token validation',
                 },
                 {
-                    displayName: 'Tool Name',
-                    name: 'toolName',
-                    type: 'string',
-                    default: 'get_eod_prices',
-                    required: true,
-                    description: 'MCP tool name Claude will call',
-                },
-                {
-                    displayName: 'Tool Description',
-                    name: 'toolDescription',
-                    type: 'string',
-                    typeOptions: { rows: 3 },
-                    default: 'Get end-of-day adjusted prices for NSE symbols',
-                    description: 'Description shown to the AI so it knows when to call this tool',
-                },
-                {
-                    displayName: 'Tool Parameters (JSON Schema properties)',
-                    name: 'toolSchema',
-                    type: 'json',
-                    default: JSON.stringify({
-                        symbols: {
-                            type: 'string',
-                            description: 'Comma-separated NSE symbols e.g. TCS,INFY',
-                        },
-                        lookback_days: {
-                            type: 'string',
-                            description: 'Number of calendar days to look back. Use 0 for a specific date.',
-                        },
-                        date: {
-                            type: 'string',
-                            description: 'Specific date YYYY-MM-DD. Only used when lookback_days is 0.',
-                        },
-                    }, null, 2),
-                    description: 'JSON Schema properties object (the fields inside "properties": {})',
+                    displayName: 'Reject Invalid Tokens',
+                    name: 'rejectInvalid',
+                    type: 'boolean',
+                    default: true,
+                    displayOptions: { show: { tokenValidation: ['auth0'] } },
+                    description: 'Return 401 immediately when token is invalid or expired',
                 },
             ],
         };
     }
+    // ── Webhook handler ──────────────────────────────────────────────────────
     async webhook() {
         const req = this.getRequestObject();
         const res = this.getResponseObject();
         const tokenValidation = this.getNodeParameter('tokenValidation', 'auth0');
         const auth0Domain = this.getNodeParameter('auth0Domain', '');
-        const toolName = this.getNodeParameter('toolName', 'tool');
-        const toolDescription = this.getNodeParameter('toolDescription', '');
-        const toolSchemaRaw = this.getNodeParameter('toolSchema', '{}');
-        // ── 1. Auth0 bearer validation ─────────────────────────────────────────
+        const rejectInvalid = this.getNodeParameter('rejectInvalid', true);
+        // ── 1. Auth0 bearer validation ───────────────────────────────────────
         if (tokenValidation === 'auth0') {
             const verifier = makeAuth0Verifier(auth0Domain);
             const middleware = (0, bearerAuth_js_1.requireBearerAuth)({ verifier });
             const passed = await new Promise((resolve) => {
                 middleware(req, res, (err) => resolve(!err));
             });
-            if (!passed)
+            if (!passed && rejectInvalid) {
+                // requireBearerAuth already wrote the 401
                 return { noWebhookResponse: true };
+            }
         }
         const authInfo = req.auth;
-        // ── 2. Parse tool schema ───────────────────────────────────────────────
-        let schemaProperties = {};
-        try {
-            schemaProperties =
-                typeof toolSchemaRaw === 'string'
-                    ? JSON.parse(toolSchemaRaw)
-                    : toolSchemaRaw;
-        }
-        catch (_) { }
-        const inputSchema = {
-            type: 'object',
-            properties: schemaProperties,
-        };
-        // ── 3. Build MCP server with low-level request handlers ───────────────
-        // We use setRequestHandler directly to avoid deep zod type inference issues
-        const mcpServer = new mcp_js_1.McpServer({ name: toolName, version: '1.0.0' });
-        const rawServer = mcpServer.server;
-        // Promise that resolves when the tool is called with args
-        let resolveToolCall;
-        const toolCallPromise = new Promise((r) => { resolveToolCall = r; });
-        // Promise that resolves when the workflow sends back a result
-        let resolveWorkflowResult;
-        const workflowResultPromise = new Promise((r) => { resolveWorkflowResult = r; });
-        // Store resolveWorkflowResult so Respond to Webhook node can call it
-        req.__resolveWorkflowResult = resolveWorkflowResult;
-        // tools/list handler
-        rawServer.setRequestHandler({ method: 'tools/list' }, async () => ({
-            tools: [{ name: toolName, description: toolDescription, inputSchema }],
+        // ── 2. Load connected tools via ai_tool port ─────────────────────────
+        // This is exactly what the native MCP Server Trigger does internally
+        const tools = (await this.getInputConnectionData(n8n_workflow_1.NodeConnectionTypes.AiTool, 0));
+        // ── 3. Build raw MCP Server with tool list + call handlers ───────────
+        const server = new index_js_1.Server({ name: 'mcp-auth-trigger', version: '1.0.0' }, { capabilities: { tools: {} } });
+        // tools/list — expose all connected tools to Claude
+        server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
+            tools: tools.map((t) => {
+                var _a;
+                return ({
+                    name: t.name,
+                    description: t.description,
+                    inputSchema: (_a = t.schema) !== null && _a !== void 0 ? _a : { type: 'object', properties: {} },
+                });
+            }),
         }));
-        // tools/call handler
-        rawServer.setRequestHandler({ method: 'tools/call' }, async (request) => {
+        // tools/call — call the matched tool and inject _auth into params
+        server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
             var _a, _b, _c, _d, _e;
-            const args = ((_a = request.params.arguments) !== null && _a !== void 0 ? _a : {});
-            resolveToolCall({
+            const { name, arguments: args = {} } = request.params;
+            const tool = tools.find((t) => t.name === name);
+            if (!tool) {
+                return {
+                    content: [{ type: 'text', text: `Tool "${name}" not found` }],
+                    isError: true,
+                };
+            }
+            // Inject auth info so the sub-workflow can validate / use it
+            const callParams = {
                 ...args,
+                access_token: (_a = authInfo === null || authInfo === void 0 ? void 0 : authInfo.token) !== null && _a !== void 0 ? _a : '',
                 _auth: authInfo
                     ? {
                         token: authInfo.token,
@@ -189,32 +191,30 @@ class McpAuthTrigger {
                         tokenValid: true,
                     }
                     : { tokenValid: false },
-            });
-            // Wait for workflow result (set by Respond to Webhook node)
-            const result = await workflowResultPromise;
-            return {
-                content: [{
-                        type: 'text',
-                        text: typeof result === 'string' ? result : JSON.stringify(result),
-                    }],
             };
+            try {
+                const result = await tool.call(callParams);
+                return {
+                    content: [{
+                            type: 'text',
+                            text: typeof result === 'string' ? result : JSON.stringify(result),
+                        }],
+                };
+            }
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                return {
+                    content: [{ type: 'text', text: `Tool error: ${msg}` }],
+                    isError: true,
+                };
+            }
         });
-        // ── 4. Create Streamable HTTP transport ───────────────────────────────
+        // ── 4. Streamable HTTP transport — handles MCP protocol ──────────────
         const transport = new streamableHttp_js_1.StreamableHTTPServerTransport({
             sessionIdGenerator: undefined, // stateless
         });
-        await mcpServer.connect(transport);
-        // Handle the incoming MCP HTTP request
+        await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
-        // ── 5. Return workflow data if a tool was called ───────────────────────
-        const raced = await Promise.race([
-            toolCallPromise.then((data) => ({ type: 'tool', data })),
-            // Timeout fallback — if it was just tools/list or initialize
-            new Promise((r) => setTimeout(() => r({ type: 'noop', data: null }), 100)),
-        ]);
-        if (raced.type === 'tool') {
-            return { workflowData: [[{ json: raced.data }]] };
-        }
         return { noWebhookResponse: true };
     }
 }
