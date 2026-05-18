@@ -8,9 +8,6 @@ import {
 } from 'n8n-workflow';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
-import type { OAuthTokenVerifier } from '@modelcontextprotocol/sdk/server/auth/provider.js';
-import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   ListToolsRequestSchema,
@@ -18,33 +15,66 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import type { Request, Response } from 'express';
 
-// ── Auth0 token verifier ──────────────────────────────────────────────────────
-function makeAuth0Verifier(domain: string): OAuthTokenVerifier {
-  return {
-    async verifyAccessToken(token: string): Promise<AuthInfo> {
-      const res = await fetch(`https://${domain}/userinfo`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        throw new Error(`Auth0 rejected token: ${res.status} ${res.statusText}`);
-      }
-      const user = (await res.json()) as Record<string, unknown>;
-      let expiresAt: number | undefined;
-      try {
-        const payload = JSON.parse(
-          Buffer.from(token.split('.')[1], 'base64').toString(),
-        ) as { exp?: number };
-        expiresAt = payload.exp;
-      } catch (_) {}
+// ── Auth info shape ───────────────────────────────────────────────────────────
+interface AuthResult {
+  valid:     boolean;
+  token:     string;
+  email:     string | null;
+  sub:       string | null;
+  userData:  Record<string, unknown> | null;
+  expiresAt: number | undefined;
+  error?:    string;
+}
+
+// ── Validate token directly with Auth0 /userinfo ─────────────────────────────
+async function validateWithAuth0(domain: string, token: string): Promise<AuthResult> {
+  if (!token) {
+    return { valid: false, token: '', email: null, sub: null, userData: null, expiresAt: undefined, error: 'No token provided' };
+  }
+
+  try {
+    const res = await fetch(`https://${domain}/userinfo`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!res.ok) {
       return {
-        token,
-        clientId: (user['sub'] as string) ?? 'unknown',
-        scopes:   [],
-        expiresAt,
-        extra: { email: user['email'], userData: user },
+        valid: false, token, email: null, sub: null, userData: null, expiresAt: undefined,
+        error: `Auth0 /userinfo returned ${res.status}: ${res.statusText}`,
       };
-    },
-  };
+    }
+
+    const user = (await res.json()) as Record<string, unknown>;
+
+    // Decode JWT exp claim
+    let expiresAt: number | undefined;
+    try {
+      const payload = JSON.parse(
+        Buffer.from(token.split('.')[1], 'base64').toString(),
+      ) as { exp?: number };
+      expiresAt = payload.exp;
+    } catch (_) {}
+
+    return {
+      valid:     true,
+      token,
+      email:     (user['email'] as string) ?? null,
+      sub:       (user['sub'] as string)   ?? null,
+      userData:  user,
+      expiresAt,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { valid: false, token, email: null, sub: null, userData: null, expiresAt: undefined, error: msg };
+  }
+}
+
+// ── Extract Bearer token from request ────────────────────────────────────────
+function extractToken(req: Request): string {
+  const authHeader =
+    (req.headers['authorization'] as string) ||
+    (req.headers['Authorization'] as string) || '';
+  return authHeader.replace(/^Bearer\s+/i, '').trim();
 }
 
 // ── Node ──────────────────────────────────────────────────────────────────────
@@ -60,7 +90,6 @@ export class McpAuthTrigger implements INodeType {
       'Connect tools via the ai_tool port exactly like the native MCP Server Trigger.',
     defaults: { name: 'MCP Auth Trigger' },
 
-    // Accept ai_tool connections from toolWorkflow nodes
     inputs: [
       {
         type:        NodeConnectionTypes.AiTool,
@@ -68,40 +97,42 @@ export class McpAuthTrigger implements INodeType {
         required:    false,
       },
     ],
-    // @ts-ignore — n8n runtime accepts string here
-    outputs:     ['main'],
-    outputNames: ['Response'],
+    // @ts-ignore
+    outputs:     [],
 
     webhooks: [
       {
-        name:         'setup',
-        httpMethod:   'GET',
-        responseMode: 'onReceived',
-        isFullPath:   true,
-        path:         '={{$parameter["path"]}}',
-        nodeType:     'mcp',
+        name:          'setup',
+        httpMethod:    'GET',
+        responseMode:  'onReceived',
+        isFullPath:    true,
+        path:          '={{$parameter["path"]}}',
+        // @ts-ignore
+        nodeType:      'mcp',
         ndvHideMethod: true,
-        ndvHideUrl:   false,
+        ndvHideUrl:    false,
       },
       {
-        name:         'default',
-        httpMethod:   'POST',
-        responseMode: 'onReceived',
-        isFullPath:   true,
-        path:         '={{$parameter["path"]}}',
-        nodeType:     'mcp',
+        name:          'default',
+        httpMethod:    'POST',
+        responseMode:  'onReceived',
+        isFullPath:    true,
+        path:          '={{$parameter["path"]}}',
+        // @ts-ignore
+        nodeType:      'mcp',
         ndvHideMethod: true,
-        ndvHideUrl:   true,
+        ndvHideUrl:    true,
       },
       {
-        name:         'default',
-        httpMethod:   'DELETE',
-        responseMode: 'onReceived',
-        isFullPath:   true,
-        path:         '={{$parameter["path"]}}',
-        nodeType:     'mcp',
+        name:          'default',
+        httpMethod:    'DELETE',
+        responseMode:  'onReceived',
+        isFullPath:    true,
+        path:          '={{$parameter["path"]}}',
+        // @ts-ignore
+        nodeType:      'mcp',
         ndvHideMethod: true,
-        ndvHideUrl:   true,
+        ndvHideUrl:    true,
       },
     ],
 
@@ -110,19 +141,19 @@ export class McpAuthTrigger implements INodeType {
         displayName: 'Path',
         name:        'path',
         type:        'string',
-        default:     'mcp',
+        default:     'mcp-auth',
         required:    true,
-        description: 'URL path for the MCP endpoint (e.g. "mcp" → /webhook/mcp)',
+        description: 'The path for this MCP endpoint (e.g. "eod_prices" → /mcp/eod_prices)',
       },
       {
         displayName: 'Token Validation',
         name:        'tokenValidation',
         type:        'options',
         options: [
-          { name: 'None',               value: 'none'  },
-          { name: 'Auth0 /userinfo',    value: 'auth0' },
+          { name: 'None',            value: 'none'  },
+          { name: 'Auth0 /userinfo', value: 'auth0' },
         ],
-        default:     'auth0',
+        default:     'none',
         description: 'How to validate the incoming Bearer token',
       },
       {
@@ -133,7 +164,7 @@ export class McpAuthTrigger implements INodeType {
         placeholder: 'your-tenant.us.auth0.com',
         required:    true,
         displayOptions: { show: { tokenValidation: ['auth0'] } },
-        description: 'Auth0 domain used to call /userinfo for token validation',
+        description: 'Auth0 domain for /userinfo validation',
       },
       {
         displayName: 'Reject Invalid Tokens',
@@ -141,7 +172,7 @@ export class McpAuthTrigger implements INodeType {
         type:        'boolean',
         default:     true,
         displayOptions: { show: { tokenValidation: ['auth0'] } },
-        description: 'Return 401 immediately when token is invalid or expired',
+        description: 'Return 401 immediately when token is invalid, or pass auth info downstream',
       },
     ],
   };
@@ -151,27 +182,30 @@ export class McpAuthTrigger implements INodeType {
     const req = this.getRequestObject() as Request;
     const res = this.getResponseObject() as Response;
 
-    const tokenValidation = this.getNodeParameter('tokenValidation', 'auth0') as string;
+    const tokenValidation = this.getNodeParameter('tokenValidation', 'none')  as string;
     const auth0Domain     = this.getNodeParameter('auth0Domain', '')           as string;
     const rejectInvalid   = this.getNodeParameter('rejectInvalid', true)       as boolean;
 
-    // ── 1. Auth0 bearer validation ───────────────────────────────────────
+    // ── 1. Validate token manually (no OAuth middleware) ──────────────────
+    let auth: AuthResult = {
+      valid: true, token: '', email: null, sub: null,
+      userData: null, expiresAt: undefined,
+    };
+
     if (tokenValidation === 'auth0') {
-      const verifier   = makeAuth0Verifier(auth0Domain);
-      const middleware = requireBearerAuth({ verifier });
-      const passed     = await new Promise<boolean>((resolve) => {
-        middleware(req, res, (err?: unknown) => resolve(!err));
-      });
-      if (!passed && rejectInvalid) {
-        // requireBearerAuth already wrote the 401
+      const token = extractToken(req);
+      auth = await validateWithAuth0(auth0Domain, token);
+
+      if (!auth.valid && rejectInvalid) {
+        res.status(401).json({
+          error:   'Unauthorized',
+          message: auth.error ?? 'Invalid or missing Bearer token',
+        });
         return { noWebhookResponse: true };
       }
     }
 
-    const authInfo: AuthInfo | undefined = (req as any).auth;
-
-    // ── 2. Load connected tools via ai_tool port ─────────────────────────
-    // This is exactly what the native MCP Server Trigger does internally
+    // ── 2. Load connected tools via ai_tool port ──────────────────────────
     const tools = (await this.getInputConnectionData(
       NodeConnectionTypes.AiTool,
       0,
@@ -182,13 +216,13 @@ export class McpAuthTrigger implements INodeType {
       call:        (params: IDataObject) => Promise<IDataObject>;
     }>;
 
-    // ── 3. Build raw MCP Server with tool list + call handlers ───────────
+    // ── 3. Build MCP server ───────────────────────────────────────────────
     const server = new Server(
       { name: 'mcp-auth-trigger', version: '1.0.0' },
       { capabilities: { tools: {} } },
     );
 
-    // tools/list — expose all connected tools to Claude
+    // tools/list
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: tools.map((t) => ({
         name:        t.name,
@@ -197,7 +231,7 @@ export class McpAuthTrigger implements INodeType {
       })),
     }));
 
-    // tools/call — call the matched tool and inject _auth into params
+    // tools/call
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args = {} } = request.params;
 
@@ -209,20 +243,18 @@ export class McpAuthTrigger implements INodeType {
         };
       }
 
-      // Inject auth info so the sub-workflow can validate / use it
+      // Inject auth info into tool params
       const callParams: IDataObject = {
         ...(args as IDataObject),
-        access_token: authInfo?.token ?? '',
-        _auth: authInfo
-          ? {
-              token:      authInfo.token,
-              clientId:   authInfo.clientId,
-              email:      authInfo.extra?.['email'] ?? null,
-              userData:   authInfo.extra?.['userData'] ?? null,
-              expiresAt:  authInfo.expiresAt,
-              tokenValid: true,
-            }
-          : { tokenValid: false },
+        access_token: auth.token,
+        _auth: {
+          token:      auth.token,
+          email:      auth.email,
+          sub:        auth.sub,
+          userData:   auth.userData,
+          expiresAt:  auth.expiresAt,
+          tokenValid: auth.valid,
+        },
       };
 
       try {
@@ -242,7 +274,7 @@ export class McpAuthTrigger implements INodeType {
       }
     });
 
-    // ── 4. Streamable HTTP transport — handles MCP protocol ──────────────
+    // ── 4. Streamable HTTP transport ──────────────────────────────────────
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless
     });
