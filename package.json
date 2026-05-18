@@ -1,13 +1,15 @@
 {
   "name": "n8n-nodes-mcp-auth-trigger",
-  "version": "1.0.0",
-  "description": "n8n community node: MCP Server Trigger with Authorization header passthrough",
+  "version": "2.0.0",
+  "description": "n8n community node: Real MCP Server Trigger (Streamable HTTP) with Auth0 Bearer token validation",
   "keywords": [
     "n8n-community-node-package",
     "n8n",
     "mcp",
     "auth",
-    "trigger"
+    "auth0",
+    "trigger",
+    "mcp-server"
   ],
   "license": "MIT",
   "author": {
@@ -31,6 +33,10 @@
     "nodes": [
       "dist/nodes/McpAuthTrigger/McpAuthTrigger.node.js"
     ]
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/express": "^4.17.25",
