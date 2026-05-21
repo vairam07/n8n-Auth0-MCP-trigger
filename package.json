@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-mcp-auth-trigger",
-  "version": "2.0.7",
+  "version": "2.0.8",
   "description": "n8n community node: Real MCP Server Trigger (Streamable HTTP) with Auth0 Bearer token validation",
   "keywords": [
     "n8n-community-node-package",
