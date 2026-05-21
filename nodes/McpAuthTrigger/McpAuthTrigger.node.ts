@@ -202,19 +202,26 @@ export class McpAuthTrigger implements INodeType {
     const auth0Domain     = this.getNodeParameter('auth0Domain', '')           as string;
     const rejectInvalid   = this.getNodeParameter('rejectInvalid', true)       as boolean;
 
-    // ── 1. Validate token manually (no OAuth middleware) ──────────────────
+    // ── 1. Determine if this request needs auth ──────────────────────────
+    // MCP discovery messages (initialize, tools/list) are always allowed so
+    // Claude can refresh the tool list without a token. Only tools/call
+    // actually executes user-facing logic and must be protected.
+    const body = req.body as IDataObject | undefined;
+    const mcpMethod = typeof body?.method === 'string' ? body.method : '';
+    const discoveryMethods = ['initialize', 'notifications/initialized', 'ping'];
+    const isDiscovery = discoveryMethods.includes(mcpMethod);
+
+    // ── 2. Validate token (skipped for discovery calls) ──────────────────
     let auth: AuthResult = {
       valid: true, token: '', email: null, sub: null,
       userData: null, expiresAt: undefined,
     };
 
-    if (tokenValidation === 'auth0') {
+    if (tokenValidation === 'auth0' && !isDiscovery) {
       const token = extractToken(req);
       auth = await validateWithAuth0(auth0Domain, token);
 
       if (!auth.valid && rejectInvalid) {
-        // Return 401 with WWW-Authenticate header — tells MCP client the
-        // token is invalid without triggering OAuth discovery flow
         res.status(401)
           .set('WWW-Authenticate', 'Bearer error="invalid_token", error_description="Auth0 token validation failed"')
           .json({
@@ -225,7 +232,7 @@ export class McpAuthTrigger implements INodeType {
       }
     }
 
-    // ── 2. Load connected tools via ai_tool port ──────────────────────────
+    // ── 3. Load connected tools via ai_tool port ──────────────────────────
     const tools = (await this.getInputConnectionData(
       NodeConnectionTypes.AiTool,
       0,
@@ -236,7 +243,7 @@ export class McpAuthTrigger implements INodeType {
       call:        (params: IDataObject) => Promise<IDataObject>;
     }>;
 
-    // ── 3. Build MCP server ───────────────────────────────────────────────
+    // ── 4. Build MCP server ───────────────────────────────────────────────
     const server = new Server(
       { name: 'mcp-auth-trigger', version: '1.0.0' },
       { capabilities: { tools: {} } },
@@ -294,7 +301,7 @@ export class McpAuthTrigger implements INodeType {
       }
     });
 
-    // ── 4. Streamable HTTP transport ──────────────────────────────────────
+    // ── 5. Streamable HTTP transport ──────────────────────────────────────
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless
     });

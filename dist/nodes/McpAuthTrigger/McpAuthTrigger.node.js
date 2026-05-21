@@ -166,17 +166,23 @@ class McpAuthTrigger {
         const tokenValidation = this.getNodeParameter('tokenValidation', 'none');
         const auth0Domain = this.getNodeParameter('auth0Domain', '');
         const rejectInvalid = this.getNodeParameter('rejectInvalid', true);
-        // ── 1. Validate token manually (no OAuth middleware) ──────────────────
+        // ── 1. Determine if this request needs auth ──────────────────────────
+        // MCP discovery messages (initialize, tools/list) are always allowed so
+        // Claude can refresh the tool list without a token. Only tools/call
+        // actually executes user-facing logic and must be protected.
+        const body = req.body;
+        const mcpMethod = typeof (body === null || body === void 0 ? void 0 : body.method) === 'string' ? body.method : '';
+        const discoveryMethods = ['initialize', 'notifications/initialized', 'ping'];
+        const isDiscovery = discoveryMethods.includes(mcpMethod);
+        // ── 2. Validate token (skipped for discovery calls) ──────────────────
         let auth = {
             valid: true, token: '', email: null, sub: null,
             userData: null, expiresAt: undefined,
         };
-        if (tokenValidation === 'auth0') {
+        if (tokenValidation === 'auth0' && !isDiscovery) {
             const token = extractToken(req);
             auth = await validateWithAuth0(auth0Domain, token);
             if (!auth.valid && rejectInvalid) {
-                // Return 401 with WWW-Authenticate header — tells MCP client the
-                // token is invalid without triggering OAuth discovery flow
                 res.status(401)
                     .set('WWW-Authenticate', 'Bearer error="invalid_token", error_description="Auth0 token validation failed"')
                     .json({
@@ -186,9 +192,9 @@ class McpAuthTrigger {
                 return { noWebhookResponse: true };
             }
         }
-        // ── 2. Load connected tools via ai_tool port ──────────────────────────
+        // ── 3. Load connected tools via ai_tool port ──────────────────────────
         const tools = (await this.getInputConnectionData(n8n_workflow_1.NodeConnectionTypes.AiTool, 0));
-        // ── 3. Build MCP server ───────────────────────────────────────────────
+        // ── 4. Build MCP server ───────────────────────────────────────────────
         const server = new index_js_1.Server({ name: 'mcp-auth-trigger', version: '1.0.0' }, { capabilities: { tools: {} } });
         // tools/list
         server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
@@ -241,7 +247,7 @@ class McpAuthTrigger {
                 };
             }
         });
-        // ── 4. Streamable HTTP transport ──────────────────────────────────────
+        // ── 5. Streamable HTTP transport ──────────────────────────────────────
         const transport = new streamableHttp_js_1.StreamableHTTPServerTransport({
             sessionIdGenerator: undefined, // stateless
         });

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm whoami *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); sdk=d.get\\('packages',{}\\).get\\('node_modules/@modelcontextprotocol/sdk',{}\\); print\\(sdk.get\\('version','not found'\\)\\)\")",
+      "Bash(npm show *)",
+      "Bash(python3 -c \"import json,sys; vs=json.load\\(sys.stdin\\); print\\('\\\\n'.join\\(vs[-15:]\\)\\)\")",
+      "Bash(curl -s -o /dev/null -w \"GET status: %{http_code}\\\\n\" https://n8n-agent.zentropylabs.com/mcp/get_positions)",
+      "Bash(curl -s -w '\\\\nPOST initialize status: %{http_code}\\\\n' -X POST https://n8n-agent.zentropylabs.com/mcp/get_positions -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}},\"id\":0}')",
+      "Bash(curl -s -w '\\\\ntools/list \\(no token\\) status: %{http_code}\\\\n' -X POST https://n8n-agent.zentropylabs.com/mcp/get_positions -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"params\":{},\"id\":1}')"
+    ]
+  }
+}
