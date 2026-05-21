@@ -192,7 +192,8 @@ class McpAuthTrigger {
         const body = req.body;
         const mcpMethod = typeof (body === null || body === void 0 ? void 0 : body.method) === 'string' ? body.method : '';
         const discoveryMethods = ['initialize', 'notifications/initialized', 'ping'];
-        const isDiscovery = discoveryMethods.includes(mcpMethod);
+        // GET requests open the SSE stream (no body/method) — always allow
+        const isDiscovery = req.method === 'GET' || discoveryMethods.includes(mcpMethod);
         // ── 2. Validate token (skipped for discovery calls) ──────────────────
         let auth = {
             valid: true, token: '', email: null, sub: null,

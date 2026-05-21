@@ -227,7 +227,8 @@ export class McpAuthTrigger implements INodeType {
     const body = req.body as IDataObject | undefined;
     const mcpMethod = typeof body?.method === 'string' ? body.method : '';
     const discoveryMethods = ['initialize', 'notifications/initialized', 'ping'];
-    const isDiscovery = discoveryMethods.includes(mcpMethod);
+    // GET requests open the SSE stream (no body/method) — always allow
+    const isDiscovery = req.method === 'GET' || discoveryMethods.includes(mcpMethod);
 
     // ── 2. Validate token (skipped for discovery calls) ──────────────────
     let auth: AuthResult = {
