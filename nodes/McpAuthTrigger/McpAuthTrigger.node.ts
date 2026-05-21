@@ -26,10 +26,21 @@ interface AuthResult {
   error?:    string;
 }
 
+// ── Token cache (1-day TTL, module-scoped so it survives across requests) ─────
+const TOKEN_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const tokenCache = new Map<string, { result: AuthResult; cachedAt: number }>();
+
 // ── Validate token directly with Auth0 /userinfo ─────────────────────────────
 async function validateWithAuth0(domain: string, token: string): Promise<AuthResult> {
   if (!token) {
     return { valid: false, token: '', email: null, sub: null, userData: null, expiresAt: undefined, error: 'No token provided' };
+  }
+
+  // Return cached result if still within TTL
+  const cacheKey = `${domain}:${token}`;
+  const cached = tokenCache.get(cacheKey);
+  if (cached && (Date.now() - cached.cachedAt) < TOKEN_CACHE_TTL_MS) {
+    return cached.result;
   }
 
   try {
@@ -55,7 +66,7 @@ async function validateWithAuth0(domain: string, token: string): Promise<AuthRes
       expiresAt = payload.exp;
     } catch (_) {}
 
-    return {
+    const result: AuthResult = {
       valid:     true,
       token,
       email:     (user['email'] as string) ?? null,
@@ -63,6 +74,11 @@ async function validateWithAuth0(domain: string, token: string): Promise<AuthRes
       userData:  user,
       expiresAt,
     };
+
+    // Cache successful validations only
+    tokenCache.set(cacheKey, { result, cachedAt: Date.now() });
+
+    return result;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { valid: false, token, email: null, sub: null, userData: null, expiresAt: undefined, error: msg };

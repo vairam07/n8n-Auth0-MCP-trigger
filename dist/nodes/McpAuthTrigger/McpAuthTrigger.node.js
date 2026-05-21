@@ -5,11 +5,20 @@ const n8n_workflow_1 = require("n8n-workflow");
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
+// ── Token cache (1-day TTL, module-scoped so it survives across requests) ─────
+const TOKEN_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const tokenCache = new Map();
 // ── Validate token directly with Auth0 /userinfo ─────────────────────────────
 async function validateWithAuth0(domain, token) {
     var _a, _b;
     if (!token) {
         return { valid: false, token: '', email: null, sub: null, userData: null, expiresAt: undefined, error: 'No token provided' };
+    }
+    // Return cached result if still within TTL
+    const cacheKey = `${domain}:${token}`;
+    const cached = tokenCache.get(cacheKey);
+    if (cached && (Date.now() - cached.cachedAt) < TOKEN_CACHE_TTL_MS) {
+        return cached.result;
     }
     try {
         const res = await fetch(`https://${domain}/userinfo`, {
@@ -29,7 +38,7 @@ async function validateWithAuth0(domain, token) {
             expiresAt = payload.exp;
         }
         catch (_) { }
-        return {
+        const result = {
             valid: true,
             token,
             email: (_a = user['email']) !== null && _a !== void 0 ? _a : null,
@@ -37,6 +46,9 @@ async function validateWithAuth0(domain, token) {
             userData: user,
             expiresAt,
         };
+        // Cache successful validations only
+        tokenCache.set(cacheKey, { result, cachedAt: Date.now() });
+        return result;
     }
     catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -163,9 +175,13 @@ class McpAuthTrigger {
             const token = extractToken(req);
             auth = await validateWithAuth0(auth0Domain, token);
             if (!auth.valid && rejectInvalid) {
-                res.status(401).json({
-                    error: 'Unauthorized',
-                    message: (_a = auth.error) !== null && _a !== void 0 ? _a : 'Invalid or missing Bearer token',
+                // Return 401 with WWW-Authenticate header — tells MCP client the
+                // token is invalid without triggering OAuth discovery flow
+                res.status(401)
+                    .set('WWW-Authenticate', 'Bearer error="invalid_token", error_description="Auth0 token validation failed"')
+                    .json({
+                    error: 'invalid_token',
+                    error_description: (_a = auth.error) !== null && _a !== void 0 ? _a : 'Invalid or missing Bearer token',
                 });
                 return { noWebhookResponse: true };
             }
