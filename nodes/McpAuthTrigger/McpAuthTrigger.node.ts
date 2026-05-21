@@ -14,6 +14,24 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { Request, Response } from 'express';
+import { zodToJsonSchema } from 'zod-to-json-schema';
+
+// ── Convert Zod schema → plain JSON Schema ────────────────────────────────────
+function toInputSchema(schema: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!schema) return { type: 'object', properties: {} };
+  // Detect Zod v3 (_def) or Zod v4 (~standard vendor)
+  const isZod =
+    '_def' in schema ||
+    (schema['~standard'] as { vendor?: string } | undefined)?.vendor === 'zod';
+  if (isZod) {
+    try {
+      return zodToJsonSchema(schema as never, { strictUnions: true }) as Record<string, unknown>;
+    } catch {
+      return { type: 'object', properties: {} };
+    }
+  }
+  return schema;
+}
 
 // ── Auth info shape ───────────────────────────────────────────────────────────
 interface AuthResult {
@@ -254,7 +272,7 @@ export class McpAuthTrigger implements INodeType {
       tools: tools.map((t) => ({
         name:        t.name,
         description: t.description,
-        inputSchema: t.schema ?? { type: 'object', properties: {} },
+        inputSchema: toInputSchema(t.schema),
       })),
     }));
 

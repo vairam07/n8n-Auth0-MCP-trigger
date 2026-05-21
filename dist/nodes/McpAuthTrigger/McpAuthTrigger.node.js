@@ -5,6 +5,25 @@ const n8n_workflow_1 = require("n8n-workflow");
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
+const zod_to_json_schema_1 = require("zod-to-json-schema");
+// ── Convert Zod schema → plain JSON Schema ────────────────────────────────────
+function toInputSchema(schema) {
+    var _a;
+    if (!schema)
+        return { type: 'object', properties: {} };
+    // Detect Zod v3 (_def) or Zod v4 (~standard vendor)
+    const isZod = '_def' in schema ||
+        ((_a = schema['~standard']) === null || _a === void 0 ? void 0 : _a.vendor) === 'zod';
+    if (isZod) {
+        try {
+            return (0, zod_to_json_schema_1.zodToJsonSchema)(schema, { strictUnions: true });
+        }
+        catch {
+            return { type: 'object', properties: {} };
+        }
+    }
+    return schema;
+}
 // ── Token cache (1-day TTL, module-scoped so it survives across requests) ─────
 const TOKEN_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const tokenCache = new Map();
@@ -198,14 +217,11 @@ class McpAuthTrigger {
         const server = new index_js_1.Server({ name: 'mcp-auth-trigger', version: '1.0.0' }, { capabilities: { tools: {} } });
         // tools/list
         server.setRequestHandler(types_js_1.ListToolsRequestSchema, async () => ({
-            tools: tools.map((t) => {
-                var _a;
-                return ({
-                    name: t.name,
-                    description: t.description,
-                    inputSchema: (_a = t.schema) !== null && _a !== void 0 ? _a : { type: 'object', properties: {} },
-                });
-            }),
+            tools: tools.map((t) => ({
+                name: t.name,
+                description: t.description,
+                inputSchema: toInputSchema(t.schema),
+            })),
         }));
         // tools/call
         server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
