@@ -7,6 +7,8 @@ import {
   NodeConnectionTypes,
 } from 'n8n-workflow';
 
+import { ProxyAgent, fetch as undiciFetch } from 'undici';
+
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
@@ -62,7 +64,12 @@ async function validateWithAuth0(domain: string, token: string): Promise<AuthRes
   }
 
   try {
-    const res = await fetch(`https://${domain}/userinfo`, {
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const fetchFn  = proxyUrl
+      ? (url: string, opts: object) => undiciFetch(url, { ...opts, dispatcher: new ProxyAgent(proxyUrl) } as Parameters<typeof undiciFetch>[1])
+      : fetch;
+
+    const res = await fetchFn(`https://${domain}/userinfo`, {
       headers: { Authorization: `Bearer ${token}` },
     });
 
