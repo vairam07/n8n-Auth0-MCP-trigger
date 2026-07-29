@@ -333,32 +333,18 @@ export class McpAuthTrigger implements INodeType {
       const isStringInputTool = schemaDef?._def?.typeName === 'ZodEffects';
       const callArg: IDataObject | string = isStringInputTool ? JSON.stringify(callParams) : callParams;
 
-      // TEMPORARY DIAGNOSTIC — prepended to every tool response so it's
-      // visible directly in the MCP client (Claude) without needing n8n's
-      // execution log (this trigger produces no execution history since it
-      // has no main output). Remove once the token-delivery issue is
-      // resolved.
-      const debugAccessToken = typeof callArg === 'string'
-        ? (JSON.parse(callArg) as IDataObject).access_token
-        : callArg.access_token;
-      const debugPrefix =
-        `[MCP-AUTH-DEBUG authValid=${auth.valid} authTokenLen=${(auth.token ?? '').length} ` +
-        `authTokenPrefix=${(auth.token ?? '').slice(0, 15)} ` +
-        `callArgAccessTokenLen=${String(debugAccessToken ?? '').length} ` +
-        `callArgAccessTokenPrefix=${String(debugAccessToken ?? '').slice(0, 15)}] `;
-
       try {
         const result = await tool.call(callArg);
         return {
           content: [{
             type: 'text' as const,
-            text: debugPrefix + (typeof result === 'string' ? result : JSON.stringify(result)),
+            text: typeof result === 'string' ? result : JSON.stringify(result),
           }],
         };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return {
-          content: [{ type: 'text' as const, text: `${debugPrefix}Tool error: ${msg}` }],
+          content: [{ type: 'text' as const, text: `Tool error: ${msg}` }],
           isError: true,
         };
       }

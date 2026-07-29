@@ -241,7 +241,7 @@ class McpAuthTrigger {
         }));
         // tools/call
         server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
-            var _a, _b, _c;
+            var _a;
             const { name, arguments: args = {} } = request.params;
             const tool = tools.find((t) => t.name === name);
             if (!tool) {
@@ -276,31 +276,19 @@ class McpAuthTrigger {
             const schemaDef = tool.schema;
             const isStringInputTool = ((_a = schemaDef === null || schemaDef === void 0 ? void 0 : schemaDef._def) === null || _a === void 0 ? void 0 : _a.typeName) === 'ZodEffects';
             const callArg = isStringInputTool ? JSON.stringify(callParams) : callParams;
-            // TEMPORARY DIAGNOSTIC — prepended to every tool response so it's
-            // visible directly in the MCP client (Claude) without needing n8n's
-            // execution log (this trigger produces no execution history since it
-            // has no main output). Remove once the token-delivery issue is
-            // resolved.
-            const debugAccessToken = typeof callArg === 'string'
-                ? JSON.parse(callArg).access_token
-                : callArg.access_token;
-            const debugPrefix = `[MCP-AUTH-DEBUG authValid=${auth.valid} authTokenLen=${((_b = auth.token) !== null && _b !== void 0 ? _b : '').length} ` +
-                `authTokenPrefix=${((_c = auth.token) !== null && _c !== void 0 ? _c : '').slice(0, 15)} ` +
-                `callArgAccessTokenLen=${String(debugAccessToken !== null && debugAccessToken !== void 0 ? debugAccessToken : '').length} ` +
-                `callArgAccessTokenPrefix=${String(debugAccessToken !== null && debugAccessToken !== void 0 ? debugAccessToken : '').slice(0, 15)}] `;
             try {
                 const result = await tool.call(callArg);
                 return {
                     content: [{
                             type: 'text',
-                            text: debugPrefix + (typeof result === 'string' ? result : JSON.stringify(result)),
+                            text: typeof result === 'string' ? result : JSON.stringify(result),
                         }],
                 };
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 return {
-                    content: [{ type: 'text', text: `${debugPrefix}Tool error: ${msg}` }],
+                    content: [{ type: 'text', text: `Tool error: ${msg}` }],
                     isError: true,
                 };
             }
