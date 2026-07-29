@@ -241,7 +241,7 @@ class McpAuthTrigger {
         }));
         // tools/call
         server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
-            var _a;
+            var _a, _b, _c;
             const { name, arguments: args = {} } = request.params;
             const tool = tools.find((t) => t.name === name);
             if (!tool) {
@@ -276,19 +276,32 @@ class McpAuthTrigger {
             const schemaDef = tool.schema;
             const isStringInputTool = ((_a = schemaDef === null || schemaDef === void 0 ? void 0 : schemaDef._def) === null || _a === void 0 ? void 0 : _a.typeName) === 'ZodEffects';
             const callArg = isStringInputTool ? JSON.stringify(callParams) : callParams;
+            // TEMPORARY DIAGNOSTIC — decodes the (unencrypted) protected header of
+            // the incoming token so its alg/enc/kid can be inspected without
+            // needing n8n execution history. Doesn't touch the encrypted payload.
+            // Remove once the Auth0 token-format investigation is done.
+            let debugHeaderJson = '';
+            try {
+                const headerB64 = (_c = ((_b = auth.token) !== null && _b !== void 0 ? _b : '').split('.')[0]) !== null && _c !== void 0 ? _c : '';
+                debugHeaderJson = Buffer.from(headerB64, 'base64').toString('utf8');
+            }
+            catch (e) {
+                debugHeaderJson = `<decode failed: ${e instanceof Error ? e.message : String(e)}>`;
+            }
+            const debugPrefix = `[MCP-AUTH-DEBUG tokenHeader=${debugHeaderJson}] `;
             try {
                 const result = await tool.call(callArg);
                 return {
                     content: [{
                             type: 'text',
-                            text: typeof result === 'string' ? result : JSON.stringify(result),
+                            text: debugPrefix + (typeof result === 'string' ? result : JSON.stringify(result)),
                         }],
                 };
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 return {
-                    content: [{ type: 'text', text: `Tool error: ${msg}` }],
+                    content: [{ type: 'text', text: `${debugPrefix}Tool error: ${msg}` }],
                     isError: true,
                 };
             }

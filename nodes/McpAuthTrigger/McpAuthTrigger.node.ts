@@ -333,18 +333,31 @@ export class McpAuthTrigger implements INodeType {
       const isStringInputTool = schemaDef?._def?.typeName === 'ZodEffects';
       const callArg: IDataObject | string = isStringInputTool ? JSON.stringify(callParams) : callParams;
 
+      // TEMPORARY DIAGNOSTIC — decodes the (unencrypted) protected header of
+      // the incoming token so its alg/enc/kid can be inspected without
+      // needing n8n execution history. Doesn't touch the encrypted payload.
+      // Remove once the Auth0 token-format investigation is done.
+      let debugHeaderJson = '';
+      try {
+        const headerB64 = (auth.token ?? '').split('.')[0] ?? '';
+        debugHeaderJson = Buffer.from(headerB64, 'base64').toString('utf8');
+      } catch (e) {
+        debugHeaderJson = `<decode failed: ${e instanceof Error ? e.message : String(e)}>`;
+      }
+      const debugPrefix = `[MCP-AUTH-DEBUG tokenHeader=${debugHeaderJson}] `;
+
       try {
         const result = await tool.call(callArg);
         return {
           content: [{
             type: 'text' as const,
-            text: typeof result === 'string' ? result : JSON.stringify(result),
+            text: debugPrefix + (typeof result === 'string' ? result : JSON.stringify(result)),
           }],
         };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return {
-          content: [{ type: 'text' as const, text: `Tool error: ${msg}` }],
+          content: [{ type: 'text' as const, text: `${debugPrefix}Tool error: ${msg}` }],
           isError: true,
         };
       }
