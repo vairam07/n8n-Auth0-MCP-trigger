@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.McpAuthTrigger = void 0;
 const n8n_workflow_1 = require("n8n-workflow");
 const undici_1 = require("undici");
+const jose_1 = require("jose");
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
@@ -28,7 +29,25 @@ function toInputSchema(schema) {
 // ── Token cache (1-day TTL, module-scoped so it survives across requests) ─────
 const TOKEN_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const tokenCache = new Map();
-// ── Validate token directly with Auth0 /userinfo ─────────────────────────────
+// ── JWKS sets are cached per Auth0 domain (module-scoped, `jose` handles its
+// own internal key-fetch caching/rotation) ───────────────────────────────────
+const jwksCache = new Map();
+function getJwks(domain) {
+    let jwks = jwksCache.get(domain);
+    if (!jwks) {
+        const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+        const fetchFn = proxyUrl
+            ? (url, opts) => (0, undici_1.fetch)(url, { ...opts, dispatcher: new undici_1.ProxyAgent(proxyUrl) })
+            : undefined;
+        jwks = (0, jose_1.createRemoteJWKSet)(new URL(`https://${domain}/.well-known/jwks.json`), fetchFn ? { [jose_1.customFetch]: fetchFn } : undefined);
+        jwksCache.set(domain, jwks);
+    }
+    return jwks;
+}
+// ── Validate token by verifying its signature against Auth0's JWKS ───────────
+// Works for any RS256-signed access token regardless of audience — unlike
+// calling /userinfo, which only accepts tokens scoped to the default OIDC
+// audience and rejects tokens issued for a custom API audience.
 async function validateWithAuth0(domain, token) {
     var _a, _b;
     if (!token) {
@@ -40,35 +59,30 @@ async function validateWithAuth0(domain, token) {
     if (cached && (Date.now() - cached.cachedAt) < TOKEN_CACHE_TTL_MS) {
         return cached.result;
     }
+    // A JWE (encrypted) token has 5 dot-separated segments instead of a JWS's
+    // 3, and can't be verified without the decryption key — only Auth0 and the
+    // token's intended recipient have it. This usually means Auth0 issued an
+    // ID token (or an access token with JWE encryption enabled) instead of a
+    // verifiable API access token.
+    if (token.split('.').length !== 3) {
+        return {
+            valid: false, token, email: null, sub: null, userData: null, expiresAt: undefined,
+            error: 'Received an encrypted (JWE) token instead of a signed JWT access token. ' +
+                'Check that the OAuth client is requesting/using the access_token (not id_token), ' +
+                'and that it is scoped to an audience with JWE encryption disabled.',
+        };
+    }
     try {
-        const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-        const fetchFn = proxyUrl
-            ? (url, opts) => (0, undici_1.fetch)(url, { ...opts, dispatcher: new undici_1.ProxyAgent(proxyUrl) })
-            : fetch;
-        const res = await fetchFn(`https://${domain}/userinfo`, {
-            headers: { Authorization: `Bearer ${token}` },
+        const { payload } = await (0, jose_1.jwtVerify)(token, getJwks(domain), {
+            issuer: `https://${domain}/`,
         });
-        if (!res.ok) {
-            return {
-                valid: false, token, email: null, sub: null, userData: null, expiresAt: undefined,
-                error: `Auth0 /userinfo returned ${res.status}: ${res.statusText}`,
-            };
-        }
-        const user = (await res.json());
-        // Decode JWT exp claim
-        let expiresAt;
-        try {
-            const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-            expiresAt = payload.exp;
-        }
-        catch (_) { }
         const result = {
             valid: true,
             token,
-            email: (_a = user['email']) !== null && _a !== void 0 ? _a : null,
-            sub: (_b = user['sub']) !== null && _b !== void 0 ? _b : null,
-            userData: user,
-            expiresAt,
+            email: (_a = payload['email']) !== null && _a !== void 0 ? _a : null,
+            sub: (_b = payload.sub) !== null && _b !== void 0 ? _b : null,
+            userData: payload,
+            expiresAt: payload.exp,
         };
         // Cache successful validations only
         tokenCache.set(cacheKey, { result, cachedAt: Date.now() });
@@ -241,7 +255,7 @@ class McpAuthTrigger {
         }));
         // tools/call
         server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
-            var _a, _b, _c;
+            var _a;
             const { name, arguments: args = {} } = request.params;
             const tool = tools.find((t) => t.name === name);
             if (!tool) {
@@ -276,32 +290,19 @@ class McpAuthTrigger {
             const schemaDef = tool.schema;
             const isStringInputTool = ((_a = schemaDef === null || schemaDef === void 0 ? void 0 : schemaDef._def) === null || _a === void 0 ? void 0 : _a.typeName) === 'ZodEffects';
             const callArg = isStringInputTool ? JSON.stringify(callParams) : callParams;
-            // TEMPORARY DIAGNOSTIC — decodes the (unencrypted) protected header of
-            // the incoming token so its alg/enc/kid can be inspected without
-            // needing n8n execution history. Doesn't touch the encrypted payload.
-            // Remove once the Auth0 token-format investigation is done.
-            let debugHeaderJson = '';
-            try {
-                const headerB64 = (_c = ((_b = auth.token) !== null && _b !== void 0 ? _b : '').split('.')[0]) !== null && _c !== void 0 ? _c : '';
-                debugHeaderJson = Buffer.from(headerB64, 'base64').toString('utf8');
-            }
-            catch (e) {
-                debugHeaderJson = `<decode failed: ${e instanceof Error ? e.message : String(e)}>`;
-            }
-            const debugPrefix = `[MCP-AUTH-DEBUG tokenHeader=${debugHeaderJson}] `;
             try {
                 const result = await tool.call(callArg);
                 return {
                     content: [{
                             type: 'text',
-                            text: debugPrefix + (typeof result === 'string' ? result : JSON.stringify(result)),
+                            text: typeof result === 'string' ? result : JSON.stringify(result),
                         }],
                 };
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 return {
-                    content: [{ type: 'text', text: `${debugPrefix}Tool error: ${msg}` }],
+                    content: [{ type: 'text', text: `Tool error: ${msg}` }],
                     isError: true,
                 };
             }

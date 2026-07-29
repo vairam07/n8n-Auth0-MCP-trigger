@@ -8,6 +8,7 @@ import {
 } from 'n8n-workflow';
 
 import { ProxyAgent, fetch as undiciFetch } from 'undici';
+import { createRemoteJWKSet, jwtVerify, customFetch } from 'jose';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -50,7 +51,29 @@ interface AuthResult {
 const TOKEN_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const tokenCache = new Map<string, { result: AuthResult; cachedAt: number }>();
 
-// ── Validate token directly with Auth0 /userinfo ─────────────────────────────
+// ── JWKS sets are cached per Auth0 domain (module-scoped, `jose` handles its
+// own internal key-fetch caching/rotation) ───────────────────────────────────
+const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+function getJwks(domain: string): ReturnType<typeof createRemoteJWKSet> {
+  let jwks = jwksCache.get(domain);
+  if (!jwks) {
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const fetchFn  = proxyUrl
+      ? (url: string, opts: object) => undiciFetch(url, { ...opts, dispatcher: new ProxyAgent(proxyUrl) } as Parameters<typeof undiciFetch>[1])
+      : undefined;
+    jwks = createRemoteJWKSet(
+      new URL(`https://${domain}/.well-known/jwks.json`),
+      fetchFn ? { [customFetch]: fetchFn as never } : undefined,
+    );
+    jwksCache.set(domain, jwks);
+  }
+  return jwks;
+}
+
+// ── Validate token by verifying its signature against Auth0's JWKS ───────────
+// Works for any RS256-signed access token regardless of audience — unlike
+// calling /userinfo, which only accepts tokens scoped to the default OIDC
+// audience and rejects tokens issued for a custom API audience.
 async function validateWithAuth0(domain: string, token: string): Promise<AuthResult> {
   if (!token) {
     return { valid: false, token: '', email: null, sub: null, userData: null, expiresAt: undefined, error: 'No token provided' };
@@ -63,41 +86,32 @@ async function validateWithAuth0(domain: string, token: string): Promise<AuthRes
     return cached.result;
   }
 
+  // A JWE (encrypted) token has 5 dot-separated segments instead of a JWS's
+  // 3, and can't be verified without the decryption key — only Auth0 and the
+  // token's intended recipient have it. This usually means Auth0 issued an
+  // ID token (or an access token with JWE encryption enabled) instead of a
+  // verifiable API access token.
+  if (token.split('.').length !== 3) {
+    return {
+      valid: false, token, email: null, sub: null, userData: null, expiresAt: undefined,
+      error: 'Received an encrypted (JWE) token instead of a signed JWT access token. ' +
+        'Check that the OAuth client is requesting/using the access_token (not id_token), ' +
+        'and that it is scoped to an audience with JWE encryption disabled.',
+    };
+  }
+
   try {
-    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-    const fetchFn  = proxyUrl
-      ? (url: string, opts: object) => undiciFetch(url, { ...opts, dispatcher: new ProxyAgent(proxyUrl) } as Parameters<typeof undiciFetch>[1])
-      : fetch;
-
-    const res = await fetchFn(`https://${domain}/userinfo`, {
-      headers: { Authorization: `Bearer ${token}` },
+    const { payload } = await jwtVerify(token, getJwks(domain), {
+      issuer: `https://${domain}/`,
     });
-
-    if (!res.ok) {
-      return {
-        valid: false, token, email: null, sub: null, userData: null, expiresAt: undefined,
-        error: `Auth0 /userinfo returned ${res.status}: ${res.statusText}`,
-      };
-    }
-
-    const user = (await res.json()) as Record<string, unknown>;
-
-    // Decode JWT exp claim
-    let expiresAt: number | undefined;
-    try {
-      const payload = JSON.parse(
-        Buffer.from(token.split('.')[1], 'base64').toString(),
-      ) as { exp?: number };
-      expiresAt = payload.exp;
-    } catch (_) {}
 
     const result: AuthResult = {
       valid:     true,
       token,
-      email:     (user['email'] as string) ?? null,
-      sub:       (user['sub'] as string)   ?? null,
-      userData:  user,
-      expiresAt,
+      email:     (payload['email'] as string) ?? null,
+      sub:       (payload.sub as string) ?? null,
+      userData:  payload as Record<string, unknown>,
+      expiresAt: payload.exp,
     };
 
     // Cache successful validations only
@@ -333,31 +347,18 @@ export class McpAuthTrigger implements INodeType {
       const isStringInputTool = schemaDef?._def?.typeName === 'ZodEffects';
       const callArg: IDataObject | string = isStringInputTool ? JSON.stringify(callParams) : callParams;
 
-      // TEMPORARY DIAGNOSTIC — decodes the (unencrypted) protected header of
-      // the incoming token so its alg/enc/kid can be inspected without
-      // needing n8n execution history. Doesn't touch the encrypted payload.
-      // Remove once the Auth0 token-format investigation is done.
-      let debugHeaderJson = '';
-      try {
-        const headerB64 = (auth.token ?? '').split('.')[0] ?? '';
-        debugHeaderJson = Buffer.from(headerB64, 'base64').toString('utf8');
-      } catch (e) {
-        debugHeaderJson = `<decode failed: ${e instanceof Error ? e.message : String(e)}>`;
-      }
-      const debugPrefix = `[MCP-AUTH-DEBUG tokenHeader=${debugHeaderJson}] `;
-
       try {
         const result = await tool.call(callArg);
         return {
           content: [{
             type: 'text' as const,
-            text: debugPrefix + (typeof result === 'string' ? result : JSON.stringify(result)),
+            text: typeof result === 'string' ? result : JSON.stringify(result),
           }],
         };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return {
-          content: [{ type: 'text' as const, text: `${debugPrefix}Tool error: ${msg}` }],
+          content: [{ type: 'text' as const, text: `Tool error: ${msg}` }],
           isError: true,
         };
       }
