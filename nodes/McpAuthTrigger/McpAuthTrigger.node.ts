@@ -319,17 +319,19 @@ export class McpAuthTrigger implements INodeType {
         },
       };
 
-      // Schema-less tools (e.g. a Code Tool with no declared input schema)
-      // are LangChain `Tool` instances whose `.call()` only preserves a raw
-      // string end-to-end — any object we pass is validated against an
-      // internal `{ input: string }` schema and everything else is silently
-      // stripped. Passing the merged payload as a JSON string instead
-      // survives that validation intact; tools with a real declared schema
-      // still get the plain args object so the LLM-supplied fields parse
-      // correctly against it.
-      const hasDeclaredSchema =
-        Object.keys(toInputSchema(tool.schema).properties as Record<string, unknown> ?? {}).length > 0;
-      const callArg: IDataObject | string = hasDeclaredSchema ? callParams : JSON.stringify(callParams);
+      // LangChain's base `Tool` class (e.g. a Code Tool with no declared
+      // input schema) wraps its schema as `z.object({ input: z.string() })
+      // .transform(...)` — a ZodEffects — and `.call()` only preserves a raw
+      // string end-to-end; any object we pass is parsed against that
+      // internal schema and everything but `input` is silently stripped.
+      // `DynamicStructuredTool`s (e.g. HTTP Request Tool) use a plain
+      // ZodObject instead — even an empty one — and require an object, not
+      // a string. Declared JSON-schema property count can't tell these
+      // apart (both can show zero properties), so check the Zod def shape
+      // directly: only a ZodEffects-wrapped schema is safe to stringify.
+      const schemaDef = tool.schema as { _def?: { typeName?: string } } | undefined;
+      const isStringInputTool = schemaDef?._def?.typeName === 'ZodEffects';
+      const callArg: IDataObject | string = isStringInputTool ? JSON.stringify(callParams) : callParams;
 
       try {
         const result = await tool.call(callArg);
