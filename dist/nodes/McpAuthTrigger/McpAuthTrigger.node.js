@@ -300,29 +300,6 @@ class McpAuthTrigger {
                 return { noWebhookResponse: true };
             }
         }
-        // ── 1a. Optionally exchange for a token scoped to the downstream API ──
-        // The caller's token is scoped only to this MCP server (a resource
-        // indicator, per the MCP authorization spec) and generally cannot be
-        // used against unrelated APIs. When enabled, fetch a separate M2M
-        // token — scoped to the configured downstream audience — to expose to
-        // connected tools instead of forwarding the caller's own token.
-        let toolAccessToken = auth.token;
-        if (downstreamAuthMode === 'clientCredentials') {
-            const m2mClientId = this.getNodeParameter('m2mClientId', '');
-            const m2mClientSecret = this.getNodeParameter('m2mClientSecret', '');
-            const downstreamAudience = this.getNodeParameter('downstreamAudience', '');
-            try {
-                toolAccessToken = await getM2MAccessToken(auth0Domain, m2mClientId, m2mClientSecret, downstreamAudience);
-            }
-            catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                res.status(502).json({
-                    error: 'downstream_token_error',
-                    error_description: `Failed to obtain downstream API access token: ${msg}`,
-                });
-                return { noWebhookResponse: true };
-            }
-        }
         // ── 2. Load connected tools via ai_tool port ──────────────────────────
         const tools = (await this.getInputConnectionData(n8n_workflow_1.NodeConnectionTypes.AiTool, 0));
         // ── 3. Build MCP server ───────────────────────────────────────────────
@@ -345,6 +322,31 @@ class McpAuthTrigger {
                     content: [{ type: 'text', text: `Tool "${name}" not found` }],
                     isError: true,
                 };
+            }
+            // The caller's token is scoped only to this MCP server (a resource
+            // indicator, per the MCP authorization spec) and generally cannot be
+            // used against unrelated APIs. When enabled, fetch a separate M2M
+            // token — scoped to the configured downstream audience — to expose to
+            // this tool instead of forwarding the caller's own token. Done here,
+            // per tool call, rather than once for the whole request: this handler
+            // also serves the initial MCP handshake/discovery, which must succeed
+            // even if the M2M credentials are misconfigured — only an actual tool
+            // invocation should be able to fail on this.
+            let toolAccessToken = auth.token;
+            if (downstreamAuthMode === 'clientCredentials') {
+                const m2mClientId = this.getNodeParameter('m2mClientId', '');
+                const m2mClientSecret = this.getNodeParameter('m2mClientSecret', '');
+                const downstreamAudience = this.getNodeParameter('downstreamAudience', '');
+                try {
+                    toolAccessToken = await getM2MAccessToken(auth0Domain, m2mClientId, m2mClientSecret, downstreamAudience);
+                }
+                catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    return {
+                        content: [{ type: 'text', text: `Failed to obtain downstream API access token: ${msg}` }],
+                        isError: true,
+                    };
+                }
             }
             // Inject auth info into tool params. access_token is whichever token
             // is appropriate for downstream calls (see downstreamAuthMode above);
