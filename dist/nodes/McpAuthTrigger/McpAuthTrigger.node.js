@@ -216,9 +216,17 @@ class McpAuthTrigger {
         // ai_tool connection type. This node has no main output, so `$('MCP Auth
         // Trigger').item` never resolves; customData is the only expression-
         // accessible channel available here.
-        this.customData.set('mcpAccessToken', (_b = auth.token) !== null && _b !== void 0 ? _b : '');
-        this.customData.set('mcpUserEmail', (_c = auth.email) !== null && _c !== void 0 ? _c : '');
-        this.customData.set('mcpUserSub', (_d = auth.sub) !== null && _d !== void 0 ? _d : '');
+        try {
+            this.customData.set('mcpAccessToken', (_b = auth.token) !== null && _b !== void 0 ? _b : '');
+            this.customData.set('mcpUserEmail', (_c = auth.email) !== null && _c !== void 0 ? _c : '');
+            this.customData.set('mcpUserSub', (_d = auth.sub) !== null && _d !== void 0 ? _d : '');
+        }
+        catch {
+            // customData requires a full execution context (runExecutionData) and
+            // is unavailable when testing via "Listen for test event" in the NDV.
+            // Token exposure via $execution.customData is best-effort — skip it
+            // rather than fail the whole MCP request.
+        }
         // ── 2. Load connected tools via ai_tool port ──────────────────────────
         const tools = (await this.getInputConnectionData(n8n_workflow_1.NodeConnectionTypes.AiTool, 0));
         // ── 3. Build MCP server ───────────────────────────────────────────────

@@ -256,9 +256,16 @@ export class McpAuthTrigger implements INodeType {
     // ai_tool connection type. This node has no main output, so `$('MCP Auth
     // Trigger').item` never resolves; customData is the only expression-
     // accessible channel available here.
-    this.customData.set('mcpAccessToken', auth.token ?? '');
-    this.customData.set('mcpUserEmail', auth.email ?? '');
-    this.customData.set('mcpUserSub', auth.sub ?? '');
+    try {
+      this.customData.set('mcpAccessToken', auth.token ?? '');
+      this.customData.set('mcpUserEmail', auth.email ?? '');
+      this.customData.set('mcpUserSub', auth.sub ?? '');
+    } catch {
+      // customData requires a full execution context (runExecutionData) and
+      // is unavailable when testing via "Listen for test event" in the NDV.
+      // Token exposure via $execution.customData is best-effort — skip it
+      // rather than fail the whole MCP request.
+    }
 
     // ── 2. Load connected tools via ai_tool port ──────────────────────────
     const tools = (await this.getInputConnectionData(
