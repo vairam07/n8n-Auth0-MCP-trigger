@@ -275,7 +275,7 @@ export class McpAuthTrigger implements INodeType {
       name:        string;
       description: string;
       schema?:     Record<string, unknown>;
-      call:        (params: IDataObject) => Promise<IDataObject>;
+      call:        (params: IDataObject | string) => Promise<IDataObject | string>;
     }>;
 
     // ── 3. Build MCP server ───────────────────────────────────────────────
@@ -319,8 +319,20 @@ export class McpAuthTrigger implements INodeType {
         },
       };
 
+      // Schema-less tools (e.g. a Code Tool with no declared input schema)
+      // are LangChain `Tool` instances whose `.call()` only preserves a raw
+      // string end-to-end — any object we pass is validated against an
+      // internal `{ input: string }` schema and everything else is silently
+      // stripped. Passing the merged payload as a JSON string instead
+      // survives that validation intact; tools with a real declared schema
+      // still get the plain args object so the LLM-supplied fields parse
+      // correctly against it.
+      const hasDeclaredSchema =
+        Object.keys(toInputSchema(tool.schema).properties as Record<string, unknown> ?? {}).length > 0;
+      const callArg: IDataObject | string = hasDeclaredSchema ? callParams : JSON.stringify(callParams);
+
       try {
-        const result = await tool.call(callParams);
+        const result = await tool.call(callArg);
         return {
           content: [{
             type: 'text' as const,

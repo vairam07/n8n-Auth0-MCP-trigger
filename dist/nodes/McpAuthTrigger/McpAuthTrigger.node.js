@@ -241,6 +241,7 @@ class McpAuthTrigger {
         }));
         // tools/call
         server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
+            var _a;
             const { name, arguments: args = {} } = request.params;
             const tool = tools.find((t) => t.name === name);
             if (!tool) {
@@ -262,8 +263,18 @@ class McpAuthTrigger {
                     tokenValid: auth.valid,
                 },
             };
+            // Schema-less tools (e.g. a Code Tool with no declared input schema)
+            // are LangChain `Tool` instances whose `.call()` only preserves a raw
+            // string end-to-end — any object we pass is validated against an
+            // internal `{ input: string }` schema and everything else is silently
+            // stripped. Passing the merged payload as a JSON string instead
+            // survives that validation intact; tools with a real declared schema
+            // still get the plain args object so the LLM-supplied fields parse
+            // correctly against it.
+            const hasDeclaredSchema = Object.keys((_a = toInputSchema(tool.schema).properties) !== null && _a !== void 0 ? _a : {}).length > 0;
+            const callArg = hasDeclaredSchema ? callParams : JSON.stringify(callParams);
             try {
-                const result = await tool.call(callParams);
+                const result = await tool.call(callArg);
                 return {
                     content: [{
                             type: 'text',
