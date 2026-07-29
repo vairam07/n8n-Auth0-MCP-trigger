@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.McpAuthTrigger = void 0;
 const n8n_workflow_1 = require("n8n-workflow");
+const undici_1 = require("undici");
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
 const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
@@ -40,7 +41,11 @@ async function validateWithAuth0(domain, token) {
         return cached.result;
     }
     try {
-        const res = await fetch(`https://${domain}/userinfo`, {
+        const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+        const fetchFn = proxyUrl
+            ? (url, opts) => (0, undici_1.fetch)(url, { ...opts, dispatcher: new undici_1.ProxyAgent(proxyUrl) })
+            : fetch;
+        const res = await fetchFn(`https://${domain}/userinfo`, {
             headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) {
@@ -179,20 +184,20 @@ class McpAuthTrigger {
     }
     // ── Webhook handler ──────────────────────────────────────────────────────
     async webhook() {
-        var _a;
+        var _a, _b, _c, _d;
         const req = this.getRequestObject();
         const res = this.getResponseObject();
         const tokenValidation = this.getNodeParameter('tokenValidation', 'none');
         const auth0Domain = this.getNodeParameter('auth0Domain', '');
         const rejectInvalid = this.getNodeParameter('rejectInvalid', true);
         // ── 1. Validate token manually (no OAuth middleware) ──────────────────
+        const rawToken = extractToken(req);
         let auth = {
-            valid: true, token: '', email: null, sub: null,
+            valid: true, token: rawToken, email: null, sub: null,
             userData: null, expiresAt: undefined,
         };
         if (tokenValidation === 'auth0') {
-            const token = extractToken(req);
-            auth = await validateWithAuth0(auth0Domain, token);
+            auth = await validateWithAuth0(auth0Domain, rawToken);
             if (!auth.valid && rejectInvalid) {
                 // Return 401 with WWW-Authenticate header — tells MCP client the
                 // token is invalid without triggering OAuth discovery flow
@@ -205,6 +210,15 @@ class McpAuthTrigger {
                 return { noWebhookResponse: true };
             }
         }
+        // ── 1b. Expose the token to connected tool nodes via execution custom
+        // data — readable from any node in this run with
+        // {{ $execution.customData.get("mcpAccessToken") }}, regardless of the
+        // ai_tool connection type. This node has no main output, so `$('MCP Auth
+        // Trigger').item` never resolves; customData is the only expression-
+        // accessible channel available here.
+        this.customData.set('mcpAccessToken', (_b = auth.token) !== null && _b !== void 0 ? _b : '');
+        this.customData.set('mcpUserEmail', (_c = auth.email) !== null && _c !== void 0 ? _c : '');
+        this.customData.set('mcpUserSub', (_d = auth.sub) !== null && _d !== void 0 ? _d : '');
         // ── 2. Load connected tools via ai_tool port ──────────────────────────
         const tools = (await this.getInputConnectionData(n8n_workflow_1.NodeConnectionTypes.AiTool, 0));
         // ── 3. Build MCP server ───────────────────────────────────────────────

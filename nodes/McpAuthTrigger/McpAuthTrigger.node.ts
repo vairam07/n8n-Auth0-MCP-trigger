@@ -228,14 +228,14 @@ export class McpAuthTrigger implements INodeType {
     const rejectInvalid   = this.getNodeParameter('rejectInvalid', true)       as boolean;
 
     // ── 1. Validate token manually (no OAuth middleware) ──────────────────
+    const rawToken = extractToken(req);
     let auth: AuthResult = {
-      valid: true, token: '', email: null, sub: null,
+      valid: true, token: rawToken, email: null, sub: null,
       userData: null, expiresAt: undefined,
     };
 
     if (tokenValidation === 'auth0') {
-      const token = extractToken(req);
-      auth = await validateWithAuth0(auth0Domain, token);
+      auth = await validateWithAuth0(auth0Domain, rawToken);
 
       if (!auth.valid && rejectInvalid) {
         // Return 401 with WWW-Authenticate header — tells MCP client the
@@ -249,6 +249,16 @@ export class McpAuthTrigger implements INodeType {
         return { noWebhookResponse: true };
       }
     }
+
+    // ── 1b. Expose the token to connected tool nodes via execution custom
+    // data — readable from any node in this run with
+    // {{ $execution.customData.get("mcpAccessToken") }}, regardless of the
+    // ai_tool connection type. This node has no main output, so `$('MCP Auth
+    // Trigger').item` never resolves; customData is the only expression-
+    // accessible channel available here.
+    this.customData.set('mcpAccessToken', auth.token ?? '');
+    this.customData.set('mcpUserEmail', auth.email ?? '');
+    this.customData.set('mcpUserSub', auth.sub ?? '');
 
     // ── 2. Load connected tools via ai_tool port ──────────────────────────
     const tools = (await this.getInputConnectionData(
