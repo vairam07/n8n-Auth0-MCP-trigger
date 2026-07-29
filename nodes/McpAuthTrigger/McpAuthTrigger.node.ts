@@ -51,23 +51,76 @@ interface AuthResult {
 const TOKEN_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const tokenCache = new Map<string, { result: AuthResult; cachedAt: number }>();
 
+// ── Proxy-aware fetch, shared by JWKS lookups and the M2M token endpoint ─────
+function getProxyAwareFetch(): typeof fetch {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  if (!proxyUrl) return fetch;
+  return ((url: string, opts: object) =>
+    undiciFetch(url, { ...opts, dispatcher: new ProxyAgent(proxyUrl) } as Parameters<typeof undiciFetch>[1])
+  ) as unknown as typeof fetch;
+}
+
 // ── JWKS sets are cached per Auth0 domain (module-scoped, `jose` handles its
 // own internal key-fetch caching/rotation) ───────────────────────────────────
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 function getJwks(domain: string): ReturnType<typeof createRemoteJWKSet> {
   let jwks = jwksCache.get(domain);
   if (!jwks) {
-    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-    const fetchFn  = proxyUrl
-      ? (url: string, opts: object) => undiciFetch(url, { ...opts, dispatcher: new ProxyAgent(proxyUrl) } as Parameters<typeof undiciFetch>[1])
-      : undefined;
     jwks = createRemoteJWKSet(
       new URL(`https://${domain}/.well-known/jwks.json`),
-      fetchFn ? { [customFetch]: fetchFn as never } : undefined,
+      { [customFetch]: getProxyAwareFetch() as never },
     );
     jwksCache.set(domain, jwks);
   }
   return jwks;
+}
+
+// ── M2M client-credentials token cache (per domain+clientId+audience) ───────
+// So the trigger can obtain its own access token, scoped to a downstream
+// API's audience, instead of forwarding the caller's MCP-scoped token — an
+// MCP client's token is deliberately scoped only to the MCP server itself
+// (per the MCP authorization spec's resource-indicator requirement) and
+// can't legitimately be replayed against unrelated APIs.
+interface M2MTokenCacheEntry { accessToken: string; expiresAt: number }
+const m2mTokenCache = new Map<string, M2MTokenCacheEntry>();
+
+async function getM2MAccessToken(
+  domain: string,
+  clientId: string,
+  clientSecret: string,
+  audience: string,
+): Promise<string> {
+  const cacheKey = `${domain}:${clientId}:${audience}`;
+  const cached = m2mTokenCache.get(cacheKey);
+  // Refresh a bit before actual expiry to avoid races with in-flight requests
+  if (cached && Date.now() < cached.expiresAt - 60_000) {
+    return cached.accessToken;
+  }
+
+  const fetchFn = getProxyAwareFetch();
+  const res = await fetchFn(`https://${domain}/oauth/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      grant_type:    'client_credentials',
+      client_id:     clientId,
+      client_secret: clientSecret,
+      audience,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Auth0 client-credentials token request failed: ${res.status} ${res.statusText} ${body}`);
+  }
+
+  const data = (await res.json()) as { access_token: string; expires_in: number };
+  m2mTokenCache.set(cacheKey, {
+    accessToken: data.access_token,
+    expiresAt:   Date.now() + data.expires_in * 1000,
+  });
+
+  return data.access_token;
 }
 
 // ── Validate token by verifying its signature against Auth0's JWKS ───────────
@@ -205,8 +258,8 @@ export class McpAuthTrigger implements INodeType {
         name:        'tokenValidation',
         type:        'options',
         options: [
-          { name: 'None',            value: 'none'  },
-          { name: 'Auth0 /userinfo', value: 'auth0' },
+          { name: 'None',                    value: 'none'  },
+          { name: 'Auth0 (JWKS Signature)',  value: 'auth0' },
         ],
         default:     'none',
         description: 'How to validate the incoming Bearer token',
@@ -217,9 +270,9 @@ export class McpAuthTrigger implements INodeType {
         type:        'string',
         default:     '',
         placeholder: 'your-tenant.us.auth0.com',
-        required:    true,
-        displayOptions: { show: { tokenValidation: ['auth0'] } },
-        description: 'Auth0 domain for /userinfo validation',
+        description:
+          'Auth0 domain used to verify incoming tokens (JWKS) and, if enabled below, ' +
+          'to request the M2M token for the downstream API',
       },
       {
         displayName: 'Reject Invalid Tokens',
@@ -229,6 +282,50 @@ export class McpAuthTrigger implements INodeType {
         displayOptions: { show: { tokenValidation: ['auth0'] } },
         description: 'Return 401 immediately when token is invalid, or pass auth info downstream',
       },
+      {
+        displayName: 'Downstream Tool Access Token',
+        name:        'downstreamAuthMode',
+        type:        'options',
+        options: [
+          { name: 'Forward Caller\'s Token', value: 'forward' },
+          { name: 'Client Credentials (M2M)', value: 'clientCredentials' },
+        ],
+        default:     'forward',
+        description:
+          'How to obtain the access_token exposed to connected tools. The caller\'s ' +
+          'token is scoped only to this MCP server (per the MCP spec) and generally ' +
+          'cannot be used against other APIs — use Client Credentials to have this ' +
+          'node fetch its own token scoped to the downstream API instead.',
+      },
+      {
+        displayName: 'M2M Client ID',
+        name:        'm2mClientId',
+        type:        'string',
+        default:     '',
+        required:    true,
+        displayOptions: { show: { downstreamAuthMode: ['clientCredentials'] } },
+        description: 'Client ID of an Auth0 Machine-to-Machine application authorized for the downstream API',
+      },
+      {
+        displayName: 'M2M Client Secret',
+        name:        'm2mClientSecret',
+        type:        'string',
+        typeOptions: { password: true },
+        default:     '',
+        required:    true,
+        displayOptions: { show: { downstreamAuthMode: ['clientCredentials'] } },
+        description: 'Client secret of the Auth0 M2M application',
+      },
+      {
+        displayName: 'Downstream Audience',
+        name:        'downstreamAudience',
+        type:        'string',
+        default:     '',
+        placeholder: 'https://prod.zentropylabs.com',
+        required:    true,
+        displayOptions: { show: { downstreamAuthMode: ['clientCredentials'] } },
+        description: 'Identifier of the downstream API to request a token for',
+      },
     ],
   };
 
@@ -237,9 +334,10 @@ export class McpAuthTrigger implements INodeType {
     const req = this.getRequestObject() as Request;
     const res = this.getResponseObject() as Response;
 
-    const tokenValidation = this.getNodeParameter('tokenValidation', 'none')  as string;
-    const auth0Domain     = this.getNodeParameter('auth0Domain', '')           as string;
-    const rejectInvalid   = this.getNodeParameter('rejectInvalid', true)       as boolean;
+    const tokenValidation     = this.getNodeParameter('tokenValidation', 'none')       as string;
+    const auth0Domain        = this.getNodeParameter('auth0Domain', '')               as string;
+    const rejectInvalid      = this.getNodeParameter('rejectInvalid', true)           as boolean;
+    const downstreamAuthMode = this.getNodeParameter('downstreamAuthMode', 'forward') as string;
 
     // ── 1. Validate token manually (no OAuth middleware) ──────────────────
     const rawToken = extractToken(req);
@@ -264,21 +362,27 @@ export class McpAuthTrigger implements INodeType {
       }
     }
 
-    // ── 1b. Expose the token to connected tool nodes via execution custom
-    // data — readable from any node in this run with
-    // {{ $execution.customData.get("mcpAccessToken") }}, regardless of the
-    // ai_tool connection type. This node has no main output, so `$('MCP Auth
-    // Trigger').item` never resolves; customData is the only expression-
-    // accessible channel available here.
-    try {
-      this.customData.set('mcpAccessToken', auth.token ?? '');
-      this.customData.set('mcpUserEmail', auth.email ?? '');
-      this.customData.set('mcpUserSub', auth.sub ?? '');
-    } catch {
-      // customData requires a full execution context (runExecutionData) and
-      // is unavailable when testing via "Listen for test event" in the NDV.
-      // Token exposure via $execution.customData is best-effort — skip it
-      // rather than fail the whole MCP request.
+    // ── 1a. Optionally exchange for a token scoped to the downstream API ──
+    // The caller's token is scoped only to this MCP server (a resource
+    // indicator, per the MCP authorization spec) and generally cannot be
+    // used against unrelated APIs. When enabled, fetch a separate M2M
+    // token — scoped to the configured downstream audience — to expose to
+    // connected tools instead of forwarding the caller's own token.
+    let toolAccessToken = auth.token;
+    if (downstreamAuthMode === 'clientCredentials') {
+      const m2mClientId     = this.getNodeParameter('m2mClientId', '')     as string;
+      const m2mClientSecret = this.getNodeParameter('m2mClientSecret', '') as string;
+      const downstreamAudience = this.getNodeParameter('downstreamAudience', '') as string;
+      try {
+        toolAccessToken = await getM2MAccessToken(auth0Domain, m2mClientId, m2mClientSecret, downstreamAudience);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        res.status(502).json({
+          error:             'downstream_token_error',
+          error_description: `Failed to obtain downstream API access token: ${msg}`,
+        });
+        return { noWebhookResponse: true };
+      }
     }
 
     // ── 2. Load connected tools via ai_tool port ──────────────────────────
@@ -319,10 +423,12 @@ export class McpAuthTrigger implements INodeType {
         };
       }
 
-      // Inject auth info into tool params
+      // Inject auth info into tool params. access_token is whichever token
+      // is appropriate for downstream calls (see downstreamAuthMode above);
+      // _auth.token always reflects the caller's own validated identity.
       const callParams: IDataObject = {
         ...(args as IDataObject),
-        access_token: auth.token,
+        access_token: toolAccessToken,
         _auth: {
           token:      auth.token,
           email:      auth.email,
@@ -347,31 +453,18 @@ export class McpAuthTrigger implements INodeType {
       const isStringInputTool = schemaDef?._def?.typeName === 'ZodEffects';
       const callArg: IDataObject | string = isStringInputTool ? JSON.stringify(callParams) : callParams;
 
-      // TEMPORARY DIAGNOSTIC — surfaces non-secret JWT claims (aud/scope/azp/
-      // iss/exp) directly in the tool response so they can be compared
-      // against what the downstream API expects, without exposing the
-      // actual bearer token. Remove once the audience/scope mismatch is
-      // resolved.
-      const claims = auth.userData ?? {};
-      const debugPrefix =
-        `[MCP-AUTH-DEBUG aud=${JSON.stringify(claims['aud'] ?? null)} ` +
-        `scope=${JSON.stringify(claims['scope'] ?? null)} ` +
-        `azp=${JSON.stringify(claims['azp'] ?? null)} ` +
-        `iss=${JSON.stringify(claims['iss'] ?? null)} ` +
-        `exp=${JSON.stringify(claims['exp'] ?? null)}] `;
-
       try {
         const result = await tool.call(callArg);
         return {
           content: [{
             type: 'text' as const,
-            text: debugPrefix + (typeof result === 'string' ? result : JSON.stringify(result)),
+            text: typeof result === 'string' ? result : JSON.stringify(result),
           }],
         };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return {
-          content: [{ type: 'text' as const, text: `${debugPrefix}Tool error: ${msg}` }],
+          content: [{ type: 'text' as const, text: `Tool error: ${msg}` }],
           isError: true,
         };
       }
