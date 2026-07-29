@@ -16,7 +16,7 @@
     "name": "Vairamuthu R",
     "email": "avmajay1001@gmail.com"
   },
-  "main": "index.js",
+  "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
