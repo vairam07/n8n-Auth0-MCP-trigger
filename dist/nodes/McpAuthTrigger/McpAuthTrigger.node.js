@@ -255,7 +255,7 @@ class McpAuthTrigger {
         }));
         // tools/call
         server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
-            var _a;
+            var _a, _b, _c, _d, _e, _f, _g;
             const { name, arguments: args = {} } = request.params;
             const tool = tools.find((t) => t.name === name);
             if (!tool) {
@@ -290,19 +290,30 @@ class McpAuthTrigger {
             const schemaDef = tool.schema;
             const isStringInputTool = ((_a = schemaDef === null || schemaDef === void 0 ? void 0 : schemaDef._def) === null || _a === void 0 ? void 0 : _a.typeName) === 'ZodEffects';
             const callArg = isStringInputTool ? JSON.stringify(callParams) : callParams;
+            // TEMPORARY DIAGNOSTIC — surfaces non-secret JWT claims (aud/scope/azp/
+            // iss/exp) directly in the tool response so they can be compared
+            // against what the downstream API expects, without exposing the
+            // actual bearer token. Remove once the audience/scope mismatch is
+            // resolved.
+            const claims = (_b = auth.userData) !== null && _b !== void 0 ? _b : {};
+            const debugPrefix = `[MCP-AUTH-DEBUG aud=${JSON.stringify((_c = claims['aud']) !== null && _c !== void 0 ? _c : null)} ` +
+                `scope=${JSON.stringify((_d = claims['scope']) !== null && _d !== void 0 ? _d : null)} ` +
+                `azp=${JSON.stringify((_e = claims['azp']) !== null && _e !== void 0 ? _e : null)} ` +
+                `iss=${JSON.stringify((_f = claims['iss']) !== null && _f !== void 0 ? _f : null)} ` +
+                `exp=${JSON.stringify((_g = claims['exp']) !== null && _g !== void 0 ? _g : null)}] `;
             try {
                 const result = await tool.call(callArg);
                 return {
                     content: [{
                             type: 'text',
-                            text: typeof result === 'string' ? result : JSON.stringify(result),
+                            text: debugPrefix + (typeof result === 'string' ? result : JSON.stringify(result)),
                         }],
                 };
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 return {
-                    content: [{ type: 'text', text: `Tool error: ${msg}` }],
+                    content: [{ type: 'text', text: `${debugPrefix}Tool error: ${msg}` }],
                     isError: true,
                 };
             }

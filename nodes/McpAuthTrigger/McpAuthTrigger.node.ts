@@ -347,18 +347,31 @@ export class McpAuthTrigger implements INodeType {
       const isStringInputTool = schemaDef?._def?.typeName === 'ZodEffects';
       const callArg: IDataObject | string = isStringInputTool ? JSON.stringify(callParams) : callParams;
 
+      // TEMPORARY DIAGNOSTIC — surfaces non-secret JWT claims (aud/scope/azp/
+      // iss/exp) directly in the tool response so they can be compared
+      // against what the downstream API expects, without exposing the
+      // actual bearer token. Remove once the audience/scope mismatch is
+      // resolved.
+      const claims = auth.userData ?? {};
+      const debugPrefix =
+        `[MCP-AUTH-DEBUG aud=${JSON.stringify(claims['aud'] ?? null)} ` +
+        `scope=${JSON.stringify(claims['scope'] ?? null)} ` +
+        `azp=${JSON.stringify(claims['azp'] ?? null)} ` +
+        `iss=${JSON.stringify(claims['iss'] ?? null)} ` +
+        `exp=${JSON.stringify(claims['exp'] ?? null)}] `;
+
       try {
         const result = await tool.call(callArg);
         return {
           content: [{
             type: 'text' as const,
-            text: typeof result === 'string' ? result : JSON.stringify(result),
+            text: debugPrefix + (typeof result === 'string' ? result : JSON.stringify(result)),
           }],
         };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         return {
-          content: [{ type: 'text' as const, text: `Tool error: ${msg}` }],
+          content: [{ type: 'text' as const, text: `${debugPrefix}Tool error: ${msg}` }],
           isError: true,
         };
       }
